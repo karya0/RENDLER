@@ -3,7 +3,7 @@ RENDLER implementation in C++
 
 Dependencies:
 ============
-- libboost_regex.so
+- libboost\_regex.so
 - libcurl.so
 - Makefile assumes all 3rdparty libraries/headers to be available in the
   default include path (/usr/include?).
@@ -18,7 +18,7 @@ Limitations/Features:
 ====================
 - Doesn't store the images to S3, just locally.
 - Image files are kept in rendler-work-dir in the same folder as the
-  render_executor executable.
+  render\_executor executable.
 - Images files are named R<N> where N is a monotonouly increasing integer.
 - It wouldn't crawl outside of the given base URL (it will still render those
   webpages) to avoid pulling in too much data.
