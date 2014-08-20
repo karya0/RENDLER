@@ -28,5 +28,5 @@ Limitations/Features:
 Communication between Scheduler and Executors:
 =============================================
 - Each framework message consists of a vector of strings:
-  RenderExecuter->Scheduler:    { taskId, taskUrl, filepath }
-  CrawlExecuter->Scheduler:     { taskId, taskUrl, <urls>+ }
+    - RenderExecuter->Scheduler:    { taskId, taskUrl, filepath }
+    - CrawlExecuter->Scheduler:     { taskId, taskUrl, \<urls>+ }
