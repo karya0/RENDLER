@@ -11,34 +11,20 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 	"path/filepath"
 )
 
 const TASK_CPUS = 0.1
 const TASK_MEM = 32.0
+const SHUTDOWN_TIMEOUT = 30  // in seconds
 
-// See the Mesos Framework Development Guide:
-// http://mesos.apache.org/documentation/latest/app-framework-development-guide
-//
-// Scheduler, scheduler driver, executor, and executor driver definitions:
-// https://github.com/apache/mesos/blob/master/src/python/src/mesos.py
-// https://github.com/apache/mesos/blob/master/include/mesos/scheduler.hpp
-//
-// Mesos protocol buffer definitions for Python:
-// https://github.com/mesosphere/deimos/blob/master/deimos/mesos_pb2.py
-// https://github.com/apache/mesos/blob/master/include/mesos/mesos.proto
-//
-// NOTE: Feel free to strip out "_ = variable" stubs. They are in place to
-// silence the Go compiler.
 func main() {
 	crawlQueue := list.New()  // list of string
 	renderQueue := list.New() // list of string
-	_ = renderQueue
 
 	processedURLs := list.New() // list of string
-	_ = processedURLs
-
-	crawlResults := list.New() // list of CrawlEdge
+	crawlResults := list.New()  // list of CrawlEdge
 	renderResults := make(map[string]string)
 
 	seedUrl := flag.String("seed", "http://mesosphere.io", "The first URL to crawl")
@@ -52,21 +38,7 @@ func main() {
 
 	tasksCreated := 0
 	tasksRunning := 0
-
-	// TODO(nnielsen): based on `tasksRunning`, do
-	// graceful shutdown of framework (allow ongoing render tasks to
-	// finish).
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, os.Kill)
-	go func(c chan os.Signal) {
-		s := <-c
-		fmt.Println("Got signal:", s)
-
-		if s == os.Interrupt {
-			rendler.WriteDOTFile(crawlResults, renderResults)
-		}
-		os.Exit(1)
-	}(c)
+	shuttingDown := false
 
 	crawlCommand := "python crawl_executor.py"
 	renderCommand := "python render_executor.py"
@@ -114,32 +86,25 @@ func main() {
 	makeCrawlTask := func(url string, offer mesos.Offer) *mesos.TaskInfo {
 		task := makeTaskPrototype(offer)
 		task.Name = proto.String("CRAWL_" + *task.TaskId.Value)
-		//
-		// TODO
-		//
+		task.Executor = crawlExecutor
+		task.Data = []byte(url)
 		return task
 	}
-	_ = makeCrawlTask
 
 	makeRenderTask := func(url string, offer mesos.Offer) *mesos.TaskInfo {
 		task := makeTaskPrototype(offer)
 		task.Name = proto.String("RENDER_" + *task.TaskId.Value)
-		//
-		// TODO
-		//
+		task.Executor = renderExecutor
+		task.Data = []byte(url)
 		return task
 	}
-	_ = makeRenderTask
 
 	maxTasksForOffer := func(offer mesos.Offer) int {
 		// TODO(nnielsen): Parse offer resources.
 		count := 0
 
 		var cpus float64 = 0
-		_ = cpus
-
 		var mem float64 = 0
-		_ = mem
 
 		for _, resource := range offer.Resources {
 			if resource.GetName() == "cpus" {
@@ -151,13 +116,14 @@ func main() {
 			}
 		}
 
-		//
-		// TODO
-		//
+		for cpus >= TASK_CPUS && mem >= TASK_MEM {
+			count++
+			cpus -= TASK_CPUS
+			mem -= TASK_MEM
+		}
 
 		return count
 	}
-	_ = maxTasksForOffer
 
 	printQueueStatistics := func() {
 		// TODO(nnielsen): Print queue lengths.
@@ -182,9 +148,36 @@ func main() {
 			ResourceOffers: func(driver *mesos.SchedulerDriver, offers []mesos.Offer) {
 				printQueueStatistics()
 
-				//
-				// TODO
-				//
+				for _, offer := range offers {
+					if shuttingDown {
+						fmt.Println("Shutting down: declining offer on [", offer.Hostname, "]")
+						driver.DeclineOffer(offer.Id)
+						continue
+					}
+
+					tasks := []mesos.TaskInfo{}
+
+					for i := 0; i < maxTasksForOffer(offer)/2; i++ {
+						if crawlQueue.Front() != nil {
+							url := crawlQueue.Front().Value.(string)
+							crawlQueue.Remove(crawlQueue.Front())
+							task := makeCrawlTask(url, offer)
+							tasks = append(tasks, *task)
+						}
+						if renderQueue.Front() != nil {
+							url := renderQueue.Front().Value.(string)
+							renderQueue.Remove(renderQueue.Front())
+							task := makeRenderTask(url, offer)
+							tasks = append(tasks, *task)
+						}
+					}
+
+					if len(tasks) == 0 {
+						driver.DeclineOffer(offer.Id)
+					} else {
+						driver.LaunchTasks(offer.Id, tasks)
+					}
+				}
 			},
 
 			StatusUpdate: func(driver *mesos.SchedulerDriver, status mesos.TaskStatus) {
@@ -211,9 +204,26 @@ func main() {
 					if err != nil {
 						log.Printf("Error deserializing CrawlResult: [%s]", err)
 					} else {
-						//
-						// TODO
-						//
+						for _, link := range result.Links {
+							edge := rendler.Edge{From: result.URL, To: link}
+							log.Printf("Appending [%s] to crawl results", edge)
+							crawlResults.PushBack(edge)
+
+							alreadyProcessed := false
+							for e := processedURLs.Front(); e != nil && !alreadyProcessed; e = e.Next() {
+								processedURL := e.Value.(string)
+								if link == processedURL {
+									alreadyProcessed = true
+								}
+							}
+
+							if !alreadyProcessed {
+								log.Printf("Enqueueing [%s]", link)
+								crawlQueue.PushBack(link)
+								renderQueue.PushBack(link)
+								processedURLs.PushBack(link)
+							}
+						}
 					}
 
 				case *renderExecutor.ExecutorId.Value:
@@ -223,9 +233,10 @@ func main() {
 					if err != nil {
 						log.Printf("Error deserializing RenderResult: [%s]", err)
 					} else {
-						//
-						// TODO
-						//
+						log.Printf(
+							"Appending [%s] to render results",
+							rendler.Edge{From: result.URL, To: result.ImageURL})
+						renderResults[result.URL] = result.ImageURL
 					}
 
 				default:
@@ -235,12 +246,36 @@ func main() {
 		},
 	}
 
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, os.Kill)
+	go func(c chan os.Signal) {
+		s := <-c
+		fmt.Println("Got signal:", s)
+
+		if s == os.Interrupt {
+			fmt.Println("RENDLER is shutting down")
+			shuttingDown = true
+			wait_started := time.Now()
+			for tasksRunning > 0 && SHUTDOWN_TIMEOUT > int(time.Since(wait_started).Seconds()) {
+				time.Sleep(time.Second)
+			}
+
+			if tasksRunning > 0 {
+				fmt.Println("Shutdown by timeout,", tasksRunning, "task(s) have not completed")
+			}
+
+			driver.Stop(false)
+		}
+	}(c)
+
 	driver.Init()
 	defer driver.Destroy()
 
 	driver.Start()
 	driver.Join()
 	driver.Stop(false)
+	rendler.WriteDOTFile(crawlResults, renderResults)
+	os.Exit(0)
 }
 
 func executorURIs() []*mesos.CommandInfo_URI {
@@ -258,10 +293,10 @@ func executorURIs() []*mesos.CommandInfo_URI {
 	}
 
 	return []*mesos.CommandInfo_URI{
-		pathToURI(baseURI+"crawl_executor.py", false),
 		pathToURI(baseURI+"render.js", false),
-		pathToURI(baseURI+"render_executor.py", false),
-		pathToURI(baseURI+"results.py", false),
-		pathToURI(baseURI+"task_state.py", false),
+		pathToURI(baseURI+"python/crawl_executor.py", false),
+		pathToURI(baseURI+"python/render_executor.py", false),
+		pathToURI(baseURI+"python/results.py", false),
+		pathToURI(baseURI+"python/task_state.py", false),
 	}
 }

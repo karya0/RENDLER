@@ -10,7 +10,7 @@ import scala.concurrent.Future
 import java.io.File
 import java.nio.charset.Charset
 
-class SchedulerSkeleton(val rendlerHome: File, seedURL: String)
+class Scheduler(val rendlerHome: File, seedURL: String)
     extends mesos.Scheduler
     with ResultProtocol
     with TaskUtils
@@ -61,13 +61,35 @@ class SchedulerSkeleton(val rendlerHome: File, seedURL: String)
     executorId: Protos.ExecutorID,
     slaveId: Protos.SlaveID,
     data: Array[Byte]): Unit = {
-
     import play.api.libs.json._
 
     println(s"Received a framework message from [${executorId.getValue}]")
+
     val jsonString = new String(data, Charset.forName("UTF-8"))
 
-    ??? // TODO
+    executorId.getValue match {
+      case id if id == crawlExecutor.getExecutorId.getValue =>
+        val result = Json.parse(jsonString).as[CrawlResult]
+        for (link <- result.links) {
+          val edge = Edge(result.url, link)
+          println(s"Appending [$edge] to crawl results")
+          crawlResults += edge
+          if (!processedURLs.contains(link)) {
+            println(s"Enqueueing [$link]")
+            crawlQueue += link
+            renderQueue += link
+            processedURLs += link
+          }
+        }
+
+      case id if id == renderExecutor.getExecutorId.getValue =>
+        val result = Json.parse(jsonString).as[RenderResult]
+        val mapping = result.url -> result.imageUrl
+        println(s"Appending [$mapping] to render results")
+        renderResults += mapping
+
+      case _ => ()
+    }
   }
 
   def offerRescinded(
@@ -96,9 +118,35 @@ class SchedulerSkeleton(val rendlerHome: File, seedURL: String)
 
     for (offer <- offers.asScala) {
       println(s"Got resource offer [$offer]")
-    }
 
-    ??? // TODO
+      if (shuttingDown) {
+        println(s"Shutting down: declining offer on [${offer.getHostname}]")
+        driver.declineOffer(offer.getId)
+      }
+      else {
+        val maxTasks = maxTasksForOffer(offer)
+
+        val tasks = mutable.Buffer[Protos.TaskInfo]()
+
+        for (_ <- 0 until maxTasks / 2) {
+          if (crawlQueue.nonEmpty) {
+            val url = crawlQueue.dequeue
+            tasks += makeCrawlTask(s"$tasksCreated", url, offer)
+            tasksCreated = tasksCreated + 1
+          }
+          if (renderQueue.nonEmpty) {
+            val url = renderQueue.dequeue
+            tasks += makeRenderTask(s"$tasksCreated", url, offer)
+            tasksCreated = tasksCreated + 1
+          }
+        }
+
+        if (tasks.nonEmpty)
+          driver.launchTasks(Seq(offer.getId).asJava, tasks.asJava)
+        else
+          driver.declineOffer(offer.getId)
+      }
+    }
   }
 
   def slaveLost(
@@ -112,8 +160,10 @@ class SchedulerSkeleton(val rendlerHome: File, seedURL: String)
     val taskId = taskStatus.getTaskId.getValue
     val state = taskStatus.getState
     println(s"Task [$taskId] is in state [$state]")
-
-    ??? // TODO
+    if (state == Protos.TaskState.TASK_RUNNING)
+      tasksRunning = tasksRunning + 1
+    else if (isTerminal(state))
+      tasksRunning = math.max(0, tasksRunning - 1)
   }
 
 }
