@@ -12,7 +12,7 @@ CXXCOMPILE = $(CXX) $(INCLUDES) $(CXXFLAGS) -c -o $@
 CXXLINK = $(CXX) $(INCLUDES) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
 default: all
-all: rendler crawl_executor render_executor
+all: rendler rendler_skeleton crawl_executor render_executor
 
 HEADERS = rendler_helper.hpp
 
@@ -26,4 +26,4 @@ check: crawl
 	./crawl http://mesosphere.io/team/
 
 clean:
-	(rm -f core crawl_executor render_executor rendler)
+	(rm -f core crawl_executor render_executor rendler rendler_skeleton)
